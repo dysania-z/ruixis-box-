@@ -133,8 +133,8 @@ function renderReader() {
     reader.innerHTML = `
       <div class="empty-reader">
         <p class="eyebrow">阅读</p>
-        <h2>收藏某一条回答，而不是整段聊天。</h2>
-        <p>复制你喜欢的那一次回答贴进来。之后搜索里面的词，就能回到这段话。</p>
+        <h2>收藏一条回答。</h2>
+        <p>在 Cursor、Codex、ChatGPT 或 DeepSeek 里复制你喜欢的那一次回答，贴进来。代码、列表和标题会按原样显示。之后搜索关键词，就能找到当时的那段话。</p>
       </div>`;
     return;
   }
