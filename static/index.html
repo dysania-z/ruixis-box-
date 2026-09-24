@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ruixi's Box</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,520;9..144,640&family=Outfit:wght@380;500;620&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside class="rail">
+      <header class="brand">
+        <div class="mark" aria-hidden="true">匣</div>
+        <div>
+          <p class="eyebrow">个人知识库</p>
+          <h1>Ruixi's Box</h1>
+        </div>
+      </header>
+
+      <label class="search">
+        <span>搜索</span>
+        <input id="search" type="search" placeholder="关键词，空格表示同时包含" autocomplete="off" />
+      </label>
+      <p class="search-hint" id="search-hint">正在全部收藏里查找</p>
+
+      <button class="nav-all active" id="all-btn" type="button">
+        <span>全部收藏</span>
+        <em id="total-count">0</em>
+      </button>
+
+      <div class="tag-head">
+        <h2>标签</h2>
+        <button id="new-tag" type="button">新建</button>
+      </div>
+      <ul class="tags" id="tag-list"></ul>
+
+      <button class="import-btn" id="open-import" type="button">收藏这条回答</button>
+    </aside>
+
+    <section class="list-pane">
+      <header class="list-head">
+        <div>
+          <p class="eyebrow" id="list-kicker">图书馆</p>
+          <h2 id="list-title">全部收藏</h2>
+        </div>
+        <span id="list-count" class="count-pill">0</span>
+      </header>
+      <div class="cards" id="cards"></div>
+    </section>
+
+    <main class="reader" id="reader">
+      <div class="empty-reader">
+        <p class="eyebrow">阅读</p>
+        <h2>收藏某一条回答，而不是整段聊天。</h2>
+        <p>在 Cursor、Codex、ChatGPT 或 DeepSeek 里复制你喜欢的那一次回答，贴进来。代码、列表和标题会按原样显示。之后搜「rl」，就能找到当时的那段话。</p>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="import-dialog">
+    <form id="import-form" method="dialog">
+      <header>
+        <p class="eyebrow">收藏</p>
+        <h3>保存这一次回答</h3>
+        <button class="ghost" id="close-import" type="button" value="cancel">关闭</button>
+      </header>
+      <section class="clip-form">
+        <p>复制 Cursor、Codex、ChatGPT、DeepSeek 里的那一条回答，贴到下面。粘贴时会保留标题、列表和代码块。</p>
+        <div class="fields">
+          <label>来源
+            <select id="paste-source">
+              <option value="cursor">Cursor</option>
+              <option value="codex">Codex</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="chatgpt">ChatGPT</option>
+              <option value="other">其他</option>
+            </select>
+          </label>
+          <label>标题（可空）
+            <input id="paste-title" type="text" placeholder="例如：ML 和 RL 的区别" />
+          </label>
+        </div>
+        <label>你的问题（可空）
+          <textarea id="paste-question" placeholder="ml 和 rl 的区别是什么？"></textarea>
+        </label>
+        <label>回答
+          <textarea id="paste-answer" placeholder="在这里粘贴那一条回答"></textarea>
+        </label>
+        <p class="eyebrow">预览</p>
+        <div class="md preview" id="paste-preview">还没有内容</div>
+        <div class="row">
+          <button class="solid" id="save-paste" type="button">收藏这条</button>
+          <a class="file-btn" id="bookmarklet" href="#">网页收藏按钮</a>
+        </div>
+        <p class="status" id="paste-status">网页上：把「网页收藏按钮」拖到书签栏。在 DeepSeek 或 ChatGPT 里选中回答，再点这个书签。</p>
+      </section>
+    </form>
+  </dialog>
+
+  <dialog id="tag-dialog">
+    <form id="tag-form">
+      <p class="eyebrow">标签</p>
+      <h3 id="tag-dialog-title">新建标签</h3>
+      <label>名称
+        <input id="tag-name" type="text" maxlength="24" required placeholder="例如：论文、调试、灵感" />
+      </label>
+      <div class="swatches" id="swatches"></div>
+      <div class="row end">
+        <button type="button" class="ghost" id="cancel-tag">取消</button>
+        <button type="submit" class="solid">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/markdown.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
