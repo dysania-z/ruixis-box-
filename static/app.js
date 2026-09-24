@@ -349,39 +349,6 @@ $("paste-answer").addEventListener("paste", (event) => {
   refreshPreview();
 });
 
-const bookmarklet = `javascript:${encodeURIComponent(`(function(){
-  var root = window.getSelection && window.getSelection().rangeCount ? window.getSelection().getRangeAt(0).cloneContents() : null;
-  var html = "";
-  if (root && root.textContent.trim()) {
-    var wrap = document.createElement("div");
-    wrap.appendChild(root);
-    html = wrap.innerHTML;
-  }
-  if (!html) {
-    var nodes = document.querySelectorAll('[data-message-author-role="assistant"], .ds-markdown');
-    var last = nodes[nodes.length - 1];
-    html = last ? last.innerHTML : "";
-  }
-  if (!html) { alert("请先选中要收藏的那一条回答"); return; }
-  var host = location.hostname;
-  var source = host.indexOf("deepseek") >= 0 ? "deepseek" : (host.indexOf("openai") >= 0 || host.indexOf("chatgpt") >= 0 ? "chatgpt" : "other");
-  var form = document.createElement("form");
-  form.method = "POST";
-  form.action = "http://127.0.0.1:8787/capture";
-  form.target = "_blank";
-  var fields = { source: source, title: document.title.slice(0, 80), answer: html };
-  Object.keys(fields).forEach(function(key){
-    var input = document.createElement("textarea");
-    input.name = key;
-    input.value = fields[key];
-    form.appendChild(input);
-  });
-  document.body.appendChild(form);
-  form.submit();
-  form.remove();
-})()`)}`;
-$("bookmarklet").href = bookmarklet;
-
 $("save-paste").addEventListener("click", async () => {
   try {
     $("paste-status").textContent = "正在收藏…";
