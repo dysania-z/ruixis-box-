@@ -1,4 +1,9 @@
-const COLORS = ["#c4492c", "#1f6f64", "#2f5d9f", "#8a5a12", "#6b4c9a", "#3d6b4f", "#a33b55", "#3e5c4a"];
+const COLORS = [
+  "#7f1d1d", "#9a3412", "#92400e", "#a16207", "#3f6212", "#14532d", "#134e4a", "#155e75", "#1e3a8a", "#312e81", "#4c1d95", "#831843",
+  "#b60205", "#d93f0b", "#b45309", "#ca8a04", "#4d7c0f", "#0e8a16", "#0f7b6c", "#0891b2", "#1d76db", "#4338ca", "#5319e7", "#ad1a72",
+  "#e03e3e", "#f97316", "#d97706", "#fbca04", "#65a30d", "#22c55e", "#0d9488", "#06b6d4", "#3b82f6", "#6366f1", "#7c3aed", "#db2777",
+  "#f4c7c3", "#f9d0c4", "#fde68a", "#fef2c0", "#d9f99d", "#c2e0c6", "#bfdadc", "#cffafe", "#c5def5", "#c7d2fe", "#d4c5f9", "#fbcfe8",
+];
 const SOURCE_LABEL = {
   cursor: "Cursor",
   codex: "Codex",
@@ -16,10 +21,21 @@ const state = {
   activeId: null,
   detail: null,
   editingTag: null,
+  editing: false,
   color: COLORS[0],
 };
 
 const $ = (id) => document.getElementById(id);
+
+function tagChipStyle(color) {
+  const hex = String(color || "#6b4a2a").replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  const text = luminance > 0.62 ? "#1c1712" : "#fffdf8";
+  return `background:${color};color:${text};border-color:transparent`;
+}
 
 function escapeHtml(value) {
   return String(value)
@@ -110,7 +126,7 @@ function render() {
             ${item.tags
               .map(
                 (tag) =>
-                  `<span class="mini-tag" style="color:${tag.color}">${escapeHtml(tag.name)}</span>`
+                  `<span class="mini-tag" style="${tagChipStyle(tag.color)}">${escapeHtml(tag.name)}</span>`
               )
               .join("")}
             <span class="time">${formatTime(item.updated_at || item.created_at)}</span>
@@ -162,21 +178,41 @@ function renderReader() {
         </div>
       </div>
       <div class="reader-tools">
+        <button type="button" id="edit-clip">改回答</button>
         <button type="button" id="rename">改标题</button>
         <button type="button" id="remove" class="danger">移出匣子</button>
         <button type="button" id="back-list" class="ghost">返回</button>
       </div>
     </header>
-    <div class="thread">
-      ${detail.messages
-        .map((message) =>
-          message.role === "user"
-            ? `<blockquote class="ask"><span class="who">问题</span>${renderMarkdown(message.content)}</blockquote>`
-            : `<article class="sheet md"><span class="who">回答</span>${renderMarkdown(message.content)}</article>`
-        )
-        .join("")}
-    </div>`;
-  markTerms(reader);
+    <div class="thread" id="thread"></div>`;
+  const question = detail.messages.find((message) => message.role === "user")?.content || "";
+  const answer = detail.messages
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.content)
+    .join("\n\n");
+  $("thread").innerHTML = `
+    ${question ? `<blockquote class="ask"><span class="who">问题</span>${renderMarkdown(question)}</blockquote>` : ""}
+    <article class="sheet">
+      <span class="who">回答</span>
+      <div class="md answer-body" id="answer-body">${renderMarkdown(answer)}</div>
+      <div class="row edit-actions" id="edit-actions">
+        <button type="button" class="solid" id="save-edit">保存修改</button>
+        <button type="button" id="cancel-edit">取消</button>
+      </div>
+      <p class="status" id="edit-status"></p>
+    </article>`;
+  if (state.editing) beginVisualEdit();
+  else markTerms($("answer-body"));
+}
+
+function beginVisualEdit() {
+  state.editing = true;
+  const body = $("answer-body");
+  if (!body) return;
+  body.contentEditable = "true";
+  body.classList.add("editing");
+  $("edit-actions").classList.add("show");
+  body.focus();
 }
 
 function markTerms(root) {
@@ -197,6 +233,7 @@ function markTerms(root) {
 
 async function openConversation(id) {
   state.activeId = id;
+  state.editing = false;
   state.detail = await api(`/api/conversations/${id}`);
   render();
 }
@@ -266,6 +303,35 @@ $("cards").addEventListener("click", (event) => {
 $("reader").addEventListener("click", async (event) => {
   if (event.target.id === "back-list") {
     $("reader").classList.remove("open");
+    return;
+  }
+  if (event.target.id === "edit-clip" && state.detail && !state.editing) {
+    beginVisualEdit();
+    return;
+  }
+  if (event.target.id === "cancel-edit") {
+    state.editing = false;
+    renderReader();
+    return;
+  }
+  if (event.target.id === "save-edit" && state.detail) {
+    const status = $("edit-status");
+    try {
+      status.textContent = "正在保存…";
+      const question = state.detail.messages.find((message) => message.role === "user")?.content || "";
+      await api(`/api/conversations/${state.detail.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          question,
+          answer: htmlToMarkdown($("answer-body").innerHTML),
+        }),
+      });
+      state.editing = false;
+      await openConversation(state.detail.id);
+      await loadLibrary();
+    } catch (error) {
+      status.textContent = error.message;
+    }
     return;
   }
   if (event.target.id === "rename" && state.detail) {

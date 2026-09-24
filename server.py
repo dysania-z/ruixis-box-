@@ -19,7 +19,20 @@ DB_PATH = Path.home() / ".ruixis-box" / "library.db"
 HOST = "127.0.0.1"
 PORT = 8787
 
-TAG_COLORS = ["#c4492c", "#1f6f64", "#2f5d9f", "#8a5a12", "#6b4c9a", "#3d6b4f", "#a33b55", "#3e5c4a"]
+TAG_COLORS = [
+    "#7f1d1d", "#b60205", "#e03e3e", "#f4c7c3",
+    "#9a3412", "#d93f0b", "#f97316", "#f9d0c4",
+    "#92400e", "#b45309", "#d97706", "#fde68a",
+    "#a16207", "#ca8a04", "#fbca04", "#fef2c0",
+    "#3f6212", "#4d7c0f", "#65a30d", "#d9f99d",
+    "#14532d", "#0e8a16", "#22c55e", "#c2e0c6",
+    "#134e4a", "#0f7b6c", "#0d9488", "#bfdadc",
+    "#155e75", "#0891b2", "#06b6d4", "#cffafe",
+    "#1e3a8a", "#1d76db", "#3b82f6", "#c5def5",
+    "#312e81", "#4338ca", "#6366f1", "#c7d2fe",
+    "#4c1d95", "#5319e7", "#7c3aed", "#d4c5f9",
+    "#831843", "#ad1a72", "#db2777", "#fbcfe8",
+]
 
 ROLE_LINE = re.compile(
     r"^\s*(?:#{1,3}\s*)?(?:\*\*)?"
@@ -825,6 +838,32 @@ class Handler(BaseHTTPRequestHandler):
             parts = [p for p in parsed.path.split("/") if p]
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "conversations":
                 cid = parts[2]
+                if "answer" in body:
+                    exists = conn.execute("SELECT id FROM conversations WHERE id = ?", (cid,)).fetchone()
+                    if not exists:
+                        self.send_json({"error": "找不到这条收藏"}, 404)
+                        return
+                    answer = str(body.get("answer") or "").replace("\r\n", "\n")
+                    question = str(body.get("question") or "").replace("\r\n", "\n").strip()
+                    if not answer.strip():
+                        self.send_json({"error": "回答不能为空"}, 400)
+                        return
+                    messages = []
+                    if question:
+                        messages.append({"role": "user", "content": question})
+                    messages.append({"role": "assistant", "content": answer})
+                    conn.execute("DELETE FROM messages WHERE conversation_id = ?", (cid,))
+                    conn.executemany(
+                        "INSERT INTO messages (conversation_id, role, content, position) VALUES (?, ?, ?, ?)",
+                        [(cid, m["role"], m["content"], i) for i, m in enumerate(messages)],
+                    )
+                    conn.execute(
+                        "UPDATE conversations SET body = ?, preview = ?, updated_at = ? WHERE id = ?",
+                        (body_from_messages(messages), clip(answer, 120), now_iso(), cid),
+                    )
+                    conn.commit()
+                    self.send_json({"ok": True})
+                    return
                 title = (body.get("title") or "").strip()
                 if not title:
                     self.send_json({"error": "标题不能为空"}, 400)
