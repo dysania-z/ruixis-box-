@@ -7,7 +7,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,520;9..144,640&family=Outfit:wght@380;500;620&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/styles.css?v=6" />
+  <link rel="stylesheet" href="/static/styles.css?v=12" />
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.css" media="print" onload="this.media='all'" />
 </head>
 <body>
   <div class="app">
@@ -68,7 +69,7 @@
         <button class="ghost" id="close-import" type="button" value="cancel">关闭</button>
       </header>
       <section class="clip-form">
-        <p>复制 Cursor、Codex、ChatGPT、DeepSeek 里的那一条回答，贴到下面。粘贴时会保留标题、列表和代码块。</p>
+        <p>复制 Cursor、Codex、ChatGPT、DeepSeek 里的那一条回答，贴到下面。粘贴时会保留标题、列表、代码块和图片。</p>
         <div class="fields">
           <label>来源
             <select id="paste-source">
@@ -93,6 +94,8 @@
         <div class="md preview" id="paste-preview">还没有内容</div>
         <div class="row">
           <button class="solid" id="save-paste" type="button">收藏这条</button>
+          <button type="button" id="add-paste-image">添加图片</button>
+          <input id="paste-image-file" type="file" accept="image/*" hidden />
         </div>
         <p class="status" id="paste-status"></p>
       </section>
@@ -114,7 +117,10 @@
     </form>
   </dialog>
 
-  <script src="/static/markdown.js"></script>
-  <script src="/static/app.js?v=6"></script>
+  <input id="edit-image-file" type="file" accept="image/*" hidden />
+  <script src="/static/markdown.js?v=12"></script>
+  <script src="/static/app.js?v=10"></script>
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16/dist/katex.min.js" async id="katex-cdn"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" async id="mermaid-cdn"></script>
 </body>
 </html>

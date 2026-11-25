@@ -72,6 +72,120 @@ async function api(path, options = {}) {
   return data;
 }
 
+async function uploadImage(payload) {
+  const result = await api("/api/images", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return result.url;
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("读不了这张图"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadFile(file) {
+  const dataUrl = await readFileAsDataUrl(file);
+  const comma = dataUrl.indexOf(",");
+  const data = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  return uploadImage({ mime: file.type, data });
+}
+
+function clipboardImageFiles(data) {
+  const files = [];
+  if (!data) return files;
+  for (const item of data.items || []) {
+    if (item.kind === "file" && item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+  }
+  if (files.length) return files;
+  return [...(data.files || [])].filter((file) => file.type.startsWith("image/"));
+}
+
+async function localizeMarkdownImages(text) {
+  const pattern = /!\[([^\]]*)\]\(([^)]+)\)/g;
+  const matches = [...String(text).matchAll(pattern)];
+  let out = text;
+  for (let i = matches.length - 1; i >= 0; i -= 1) {
+    const match = matches[i];
+    const alt = match[1];
+    const src = match[2].trim();
+    if (src.startsWith("/media/")) continue;
+    if (!(src.startsWith("data:") || src.startsWith("http://") || src.startsWith("https://"))) continue;
+    try {
+      const url = src.startsWith("data:")
+        ? await uploadImage({ data: src })
+        : await uploadImage({ url: src });
+      const start = match.index;
+      out = `${out.slice(0, start)}![${alt}](${url})${out.slice(start + match[0].length)}`;
+    } catch {
+      /* keep original src */
+    }
+  }
+  return out;
+}
+
+function insertInTextarea(box, text) {
+  const start = box.selectionStart ?? box.value.length;
+  const end = box.selectionEnd ?? box.value.length;
+  box.value = `${box.value.slice(0, start)}${text}${box.value.slice(end)}`;
+  const pos = start + text.length;
+  box.selectionStart = box.selectionEnd = pos;
+  box.focus();
+}
+
+let editRange = null;
+
+function rememberEditSelection() {
+  const body = $("answer-body");
+  const sel = window.getSelection();
+  if (!body || !sel || !sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (body === range.commonAncestorContainer || body.contains(range.commonAncestorContainer)) {
+    editRange = range.cloneRange();
+  }
+}
+
+function restoreEditSelection() {
+  const body = $("answer-body");
+  if (!body) return;
+  body.focus();
+  const sel = window.getSelection();
+  if (!sel) return;
+  sel.removeAllRanges();
+  if (editRange) sel.addRange(editRange);
+}
+
+function insertImageNode(url, alt = "") {
+  restoreEditSelection();
+  const body = $("answer-body");
+  if (!body) return;
+  const img = document.createElement("img");
+  img.className = "md-img";
+  img.src = url;
+  img.alt = alt;
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount && (body === sel.anchorNode || body.contains(sel.anchorNode))) {
+    const range = sel.getRangeAt(0);
+    range.deleteContents();
+    range.insertNode(img);
+    range.setStartAfter(img);
+    range.collapse(true);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    editRange = range.cloneRange();
+  } else {
+    body.appendChild(img);
+  }
+}
+
 async function loadLibrary() {
   const params = new URLSearchParams();
   if (state.q) params.set("q", state.q);
@@ -197,12 +311,14 @@ function renderReader() {
       <div class="md answer-body" id="answer-body">${renderMarkdown(answer)}</div>
       <div class="row edit-actions" id="edit-actions">
         <button type="button" class="solid" id="save-edit">保存修改</button>
+        <button type="button" id="insert-edit-image">插入图片</button>
         <button type="button" id="cancel-edit">取消</button>
       </div>
       <p class="status" id="edit-status"></p>
     </article>`;
   if (state.editing) beginVisualEdit();
   else markTerms($("answer-body"));
+  paintMermaid($("thread"));
 }
 
 function beginVisualEdit() {
@@ -223,6 +339,7 @@ function markTerms(root) {
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
+    if (node.parentElement?.closest(".mermaid-wrap, svg, .katex, .math-block, .math-inline")) continue;
     if (!pattern.test(node.textContent)) continue;
     pattern.lastIndex = 0;
     const span = document.createElement("span");
@@ -309,6 +426,11 @@ $("reader").addEventListener("click", async (event) => {
     beginVisualEdit();
     return;
   }
+  if (event.target.id === "insert-edit-image" && state.editing) {
+    rememberEditSelection();
+    $("edit-image-file").click();
+    return;
+  }
   if (event.target.id === "cancel-edit") {
     state.editing = false;
     renderReader();
@@ -319,11 +441,20 @@ $("reader").addEventListener("click", async (event) => {
     try {
       status.textContent = "正在保存…";
       const question = state.detail.messages.find((message) => message.role === "user")?.content || "";
+      const previous = state.detail.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.content)
+        .join("\n\n");
+      const answer = htmlToMarkdown($("answer-body").innerHTML);
+      if (previous.trim().length > 80 && answer.trim().length < previous.trim().length * 0.4) {
+        status.textContent = "这次保存会丢掉很多原文，已取消。请再看一眼回答再存。";
+        return;
+      }
       await api(`/api/conversations/${state.detail.id}`, {
         method: "PATCH",
         body: JSON.stringify({
           question,
-          answer: htmlToMarkdown($("answer-body").innerHTML),
+          answer,
         }),
       });
       state.editing = false;
@@ -368,6 +499,35 @@ $("reader").addEventListener("change", async (event) => {
   await setTags(next);
 });
 
+$("reader").addEventListener("paste", async (event) => {
+  if (!state.editing) return;
+  const body = $("answer-body");
+  if (!body || !(body === event.target || body.contains(event.target))) return;
+  const files = clipboardImageFiles(event.clipboardData);
+  if (files.length) {
+    event.preventDefault();
+    for (const file of files) {
+      try {
+        insertImageNode(await uploadFile(file));
+      } catch (error) {
+        $("edit-status").textContent = error.message;
+      }
+    }
+    return;
+  }
+  const html = event.clipboardData?.getData("text/html") || "";
+  if (!html || !/<img/i.test(html)) return;
+  event.preventDefault();
+  try {
+    const localized = await localizeMarkdownImages(htmlToMarkdown(html));
+    restoreEditSelection();
+    document.execCommand("insertHTML", false, renderMarkdown(localized) || localized);
+    paintMermaid(body);
+  } catch (error) {
+    $("edit-status").textContent = error.message;
+  }
+});
+
 $("new-tag").addEventListener("click", () => openTagDialog(null));
 $("cancel-tag").addEventListener("click", () => $("tag-dialog").close());
 $("swatches").addEventListener("click", (event) => {
@@ -398,21 +558,62 @@ $("close-import").addEventListener("click", () => $("import-dialog").close());
 function refreshPreview() {
   const answer = $("paste-answer").value;
   $("paste-preview").innerHTML = answer.trim() ? renderMarkdown(answer) : "还没有内容";
+  paintMermaid($("paste-preview"));
 }
 
 $("paste-answer").addEventListener("input", refreshPreview);
-$("paste-answer").addEventListener("paste", (event) => {
+$("paste-answer").addEventListener("paste", async (event) => {
+  const files = clipboardImageFiles(event.clipboardData);
+  if (files.length) {
+    event.preventDefault();
+    const chunks = [];
+    for (const file of files) {
+      try {
+        chunks.push(`![](${await uploadFile(file)})`);
+      } catch (error) {
+        $("paste-status").textContent = error.message;
+      }
+    }
+    if (!chunks.length) return;
+    insertInTextarea($("paste-answer"), `\n${chunks.join("\n")}\n`);
+    refreshPreview();
+    return;
+  }
   const html = event.clipboardData?.getData("text/html") || "";
   const plain = event.clipboardData?.getData("text/plain") || "";
   const markdown = html ? htmlToMarkdown(html) : plain;
-  const chosen = markdown.includes("```") || markdown.includes("**") || markdown.includes("\n- ") ? markdown : plain || markdown;
+  const chosen =
+    markdown.includes("```") || markdown.includes("**") || markdown.includes("\n- ") || markdown.includes("![")
+      ? markdown
+      : plain || markdown;
   if (!chosen) return;
   event.preventDefault();
-  const box = $("paste-answer");
-  const start = box.selectionStart ?? box.value.length;
-  const end = box.selectionEnd ?? box.value.length;
-  box.value = box.value.slice(0, start) + chosen + box.value.slice(end);
+  insertInTextarea($("paste-answer"), await localizeMarkdownImages(chosen));
   refreshPreview();
+});
+
+$("add-paste-image").addEventListener("click", () => $("paste-image-file").click());
+$("paste-image-file").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    insertInTextarea($("paste-answer"), `\n![](${await uploadFile(file)})\n`);
+    refreshPreview();
+  } catch (error) {
+    $("paste-status").textContent = error.message;
+  }
+});
+
+$("edit-image-file").addEventListener("change", async (event) => {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file || !state.editing) return;
+  try {
+    insertImageNode(await uploadFile(file));
+  } catch (error) {
+    $("edit-status").textContent = error.message;
+  }
 });
 
 $("save-paste").addEventListener("click", async () => {
@@ -439,11 +640,35 @@ $("save-paste").addEventListener("click", async () => {
   }
 });
 
+document.addEventListener("selectionchange", () => {
+  if (!state.editing) return;
+  const body = $("answer-body");
+  if (!body) return;
+  const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (body === range.commonAncestorContainer || body.contains(range.commonAncestorContainer)) {
+    editRange = range.cloneRange();
+  }
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "/" && document.activeElement?.tagName !== "INPUT" && document.activeElement?.tagName !== "TEXTAREA") {
     event.preventDefault();
     $("search").focus();
   }
+});
+
+function rerenderMath() {
+  if (state.editing) return;
+  if (state.detail) renderReader();
+  const box = $("paste-answer");
+  if (box?.value.trim()) refreshPreview();
+}
+
+["katex-cdn", "mermaid-cdn"].forEach((id) => {
+  const el = $(id);
+  if (el) el.addEventListener("load", rerenderMath);
 });
 
 loadLibrary().catch((error) => {

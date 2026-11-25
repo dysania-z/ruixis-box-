@@ -3,21 +3,37 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import re
 import sqlite3
-from html.parser import HTMLParser
 import uuid
 from datetime import datetime, timezone
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import URLError
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
 DB_PATH = Path.home() / ".ruixis-box" / "library.db"
+IMAGES = DB_PATH.parent / "images"
 HOST = "127.0.0.1"
 PORT = 8787
+MAX_IMAGE = 8 * 1024 * 1024
+IMAGE_NAME = re.compile(r"^[0-9a-f]{32}\.(png|jpe?g|gif|webp|svg)$")
+IMAGE_MD = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+MIME_EXT = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/jpg": "jpg",
+    "image/gif": "gif",
+    "image/webp": "webp",
+    "image/svg+xml": "svg",
+}
 
 TAG_COLORS = [
     "#7f1d1d", "#b60205", "#e03e3e", "#f4c7c3",
@@ -106,10 +122,79 @@ def connect() -> sqlite3.Connection:
 
 
 def clip(text: str, limit: int = 72) -> str:
-    flat = re.sub(r"\s+", " ", text).strip()
+    flat = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", text)
+    flat = re.sub(r"\s+", " ", flat).strip()
     if len(flat) <= limit:
         return flat
     return flat[: limit - 1] + "…"
+
+
+def guess_image_ext(mime: str, data: bytes) -> str:
+    kind = (mime or "").split(";")[0].strip().lower()
+    if kind in MIME_EXT:
+        return MIME_EXT[kind]
+    if data.startswith(b"\x89PNG"):
+        return "png"
+    if data.startswith(b"\xff\xd8"):
+        return "jpg"
+    if data.startswith(b"GIF8"):
+        return "gif"
+    if data.startswith(b"RIFF") and b"WEBP" in data[:16]:
+        return "webp"
+    head = data.lstrip()[:200].lower()
+    if head.startswith(b"<svg") or b"<svg" in head:
+        return "svg"
+    raise ValueError("unsupported")
+
+
+def store_image(data: bytes, mime: str = "") -> str:
+    if not data:
+        raise ValueError("empty")
+    if len(data) > MAX_IMAGE:
+        raise ValueError("too large")
+    ext = guess_image_ext(mime, data)
+    IMAGES.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}.{ext}"
+    (IMAGES / name).write_bytes(data)
+    return f"/media/{name}"
+
+
+def ingest_image_src(src: str) -> str:
+    src = src.strip().strip("<>")
+    if src.startswith("/media/"):
+        name = src.removeprefix("/media/")
+        if IMAGE_NAME.match(name) and (IMAGES / name).is_file():
+            return src
+        raise ValueError("missing")
+    if src.startswith("data:"):
+        header, _, payload = src.partition(",")
+        if not payload:
+            raise ValueError("empty")
+        mime = "image/png"
+        match = re.match(r"data:([^;]+)", header)
+        if match:
+            mime = match.group(1)
+        return store_image(base64.b64decode(payload), mime)
+    if src.startswith("http://") or src.startswith("https://"):
+        request = Request(src, headers={"User-Agent": "RuixiBox/1"})
+        with urlopen(request, timeout=15) as response:
+            mime = response.headers.get_content_type() or ""
+            data = response.read(MAX_IMAGE + 1)
+        if len(data) > MAX_IMAGE:
+            raise ValueError("too large")
+        return store_image(data, mime)
+    raise ValueError("bad src")
+
+
+def localize_markdown_images(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        alt, src = match.group(1), match.group(2).strip()
+        try:
+            return f"![{alt}]({ingest_image_src(src)})"
+        except (ValueError, URLError, OSError, TimeoutError, binascii.Error):
+            return match.group(0)
+
+    return IMAGE_MD.sub(replace, text)
 
 
 def text_from_parts(content) -> str:
@@ -563,81 +648,270 @@ class HtmlToMarkdown(HTMLParser):
         self.in_pre = 0
         self.list_stack: list[str] = []
         self.ol_index: list[int] = []
+        self.tables: list[dict] = []
+        self.katex_depth = 0
+        self.katex_display = False
+        self.katex_tex: list[str] = []
+        self.got_math_src = False
+        self.in_tex_ann = False
+        self.in_math_src = False
+        self.in_math_script = False
+        self.math_script_display = False
+
+    def emit(self, text: str) -> None:
+        if self.tables and self.tables[-1]["cell"] is not None:
+            self.tables[-1]["cell"].append(text)
+        elif not self.tables:
+            self.parts.append(text)
+
+    def close_cell(self) -> None:
+        if not self.tables:
+            return
+        frame = self.tables[-1]
+        if frame["cell"] is None:
+            return
+        text = re.sub(r"\s+", " ", "".join(frame["cell"])).strip().replace("|", r"\|")
+        if frame["row"] is not None:
+            frame["row"].append(text)
+        frame["cell"] = None
+
+    def close_row(self) -> None:
+        if not self.tables:
+            return
+        self.close_cell()
+        frame = self.tables[-1]
+        if frame["row"] is None:
+            return
+        if any(cell.strip() for cell in frame["row"]):
+            frame["rows"].append(frame["row"])
+        frame["row"] = None
+
+    def close_table(self) -> None:
+        if not self.tables:
+            return
+        self.close_row()
+        frame = self.tables.pop()
+        rows = frame["rows"]
+        if not rows:
+            return
+        width = max(len(row) for row in rows)
+
+        def line(row: list[str]) -> str:
+            cells = [row[i] if i < len(row) else "" for i in range(width)]
+            return "| " + " | ".join(cells) + " |"
+
+        lined = [line(rows[0]), "| " + " | ".join(["---"] * width) + " |"]
+        lined.extend(line(row) for row in rows[1:])
+        self.emit("\n" + "\n".join(lined) + "\n")
+
+    def emit_tex(self, tex: str, display: bool) -> None:
+        tex = tex.strip()
+        if not tex:
+            return
+        self.emit(f"\n$${tex}$$\n" if display else f"${tex}$")
 
     def handle_starttag(self, tag, attrs):
-        if tag in {"script", "style"}:
+        attrs_d = dict(attrs)
+        classes = set((attrs_d.get("class") or "").split())
+        if self.katex_depth:
+            self.katex_depth += 1
+            encoding = attrs_d.get("encoding") or ""
+            if tag == "annotation" and "tex" in encoding:
+                self.in_tex_ann = True
+            if "math-src" in classes:
+                self.in_math_src = True
+            return
+        if tag == "script":
+            typ = (attrs_d.get("type") or "").lower()
+            if "math/tex" in typ:
+                self.in_math_script = True
+                self.math_script_display = "display" in typ
+                self.katex_tex = []
+                return
             self.skip += 1
             return
+        if tag == "style":
+            self.skip += 1
+            return
+        if self.skip:
+            return
+        if tag in {"span", "div", "mjx-container"} and (
+            "katex-display" in classes
+            or "katex" in classes
+            or "math-inline" in classes
+            or "math-block" in classes
+            or "MathJax" in classes
+            or tag == "mjx-container"
+        ):
+            self.katex_depth = 1
+            self.katex_display = (
+                "katex-display" in classes
+                or "math-block" in classes
+                or attrs_d.get("display") == "true"
+                or "MathJax_Display" in classes
+            )
+            self.katex_tex = []
+            self.got_math_src = False
+            self.in_tex_ann = False
+            self.in_math_src = "math-src" in classes
+            return
+        if tag == "table":
+            self.tables.append({"rows": [], "row": None, "cell": None})
+            return
+        if tag == "tr" and self.tables:
+            self.close_row()
+            self.tables[-1]["row"] = []
+            return
+        if tag in {"td", "th"} and self.tables:
+            self.close_cell()
+            self.tables[-1]["cell"] = []
+            return
+        if tag in {"thead", "tbody", "tfoot", "colgroup", "col"}:
+            return
         if tag == "br":
-            self.parts.append("\n")
+            self.emit("\n")
         elif tag == "pre":
             self.in_pre += 1
-            self.parts.append("\n```\n")
+            self.emit("\n```\n")
         elif tag == "code" and not self.in_pre:
-            self.parts.append("`")
+            self.emit("`")
         elif tag in {"strong", "b"}:
-            self.parts.append("**")
+            self.emit("**")
         elif tag in {"em", "i"}:
-            self.parts.append("*")
+            self.emit("*")
         elif tag in {"h1", "h2", "h3", "h4"}:
-            self.parts.append("\n" + "#" * int(tag[1]) + " ")
+            self.emit("\n" + "#" * int(tag[1]) + " ")
         elif tag == "li":
             kind = self.list_stack[-1] if self.list_stack else "ul"
             if kind == "ol":
                 self.ol_index[-1] += 1
-                self.parts.append(f"\n{self.ol_index[-1]}. ")
+                self.emit(f"\n{self.ol_index[-1]}. ")
             else:
-                self.parts.append("\n- ")
+                self.emit("\n- ")
         elif tag == "ul":
             self.list_stack.append("ul")
         elif tag == "ol":
             self.list_stack.append("ol")
             self.ol_index.append(0)
         elif tag == "p":
-            self.parts.append("\n")
+            if not self.list_stack:
+                self.emit("\n")
         elif tag == "blockquote":
-            self.parts.append("\n> ")
+            self.emit("\n> ")
+        elif tag == "img":
+            attrs = dict(attrs)
+            src = (attrs.get("src") or "").strip()
+            alt = (attrs.get("alt") or "").replace("]", "")
+            if src:
+                self.emit(f"\n![{alt}]({src})\n")
 
     def handle_endtag(self, tag):
+        if self.in_math_script and tag == "script":
+            self.emit_tex("".join(self.katex_tex), self.math_script_display)
+            self.in_math_script = False
+            self.katex_tex = []
+            return
+        if self.in_tex_ann and tag == "annotation":
+            self.in_tex_ann = False
+        if self.in_math_src and tag in {"pre", "span", "code"}:
+            self.in_math_src = False
+        if self.katex_depth:
+            self.katex_depth -= 1
+            if self.katex_depth == 0:
+                self.emit_tex("".join(self.katex_tex), self.katex_display)
+                self.katex_tex = []
+                self.in_tex_ann = False
+                self.in_math_src = False
+                self.got_math_src = False
+            return
         if tag in {"script", "style"}:
             self.skip = max(0, self.skip - 1)
             return
+        if self.skip:
+            return
+        if tag == "table":
+            self.close_table()
+            return
+        if tag == "tr" and self.tables:
+            self.close_row()
+            return
+        if tag in {"td", "th"} and self.tables:
+            self.close_cell()
+            return
+        if tag in {"thead", "tbody", "tfoot", "colgroup", "col"}:
+            return
         if tag == "pre":
             self.in_pre = max(0, self.in_pre - 1)
-            self.parts.append("\n```\n")
+            self.emit("\n```\n")
         elif tag == "code" and not self.in_pre:
-            self.parts.append("`")
+            self.emit("`")
         elif tag in {"strong", "b"}:
-            self.parts.append("**")
+            self.emit("**")
         elif tag in {"em", "i"}:
-            self.parts.append("*")
-        elif tag in {"h1", "h2", "h3", "h4", "p", "li"}:
-            self.parts.append("\n")
+            self.emit("*")
+        elif tag in {"h1", "h2", "h3", "h4", "li"}:
+            self.emit("\n")
+        elif tag == "p":
+            if not self.list_stack:
+                self.emit("\n")
         elif tag == "ul" and self.list_stack:
             self.list_stack.pop()
-            self.parts.append("\n")
+            self.emit("\n")
         elif tag == "ol" and self.list_stack:
             self.list_stack.pop()
             if self.ol_index:
                 self.ol_index.pop()
-            self.parts.append("\n")
+            self.emit("\n")
 
     def handle_data(self, data):
+        if self.in_math_script or self.in_math_src:
+            self.katex_tex.append(data)
+            self.got_math_src = self.got_math_src or self.in_math_src
+            return
+        if self.in_tex_ann and not self.got_math_src:
+            self.katex_tex.append(data)
+            return
+        if self.katex_depth:
+            return
         if self.skip:
             return
-        self.parts.append(data.replace("\xa0", " "))
+        text = data.replace("\xa0", " ")
+        if self.list_stack and not self.in_pre:
+            text = re.sub(r"\s+", " ", text)
+            if not text:
+                return
+            if text.startswith(" ") and self.parts and self.parts[-1].endswith((" ", "\n")):
+                text = text.lstrip()
+                if not text:
+                    return
+        self.emit(text)
 
 
 def html_to_markdown(raw: str) -> str:
+    stashed: list[str] = []
+
+    def keep_svg(match: re.Match[str]) -> str:
+        stashed.append(match.group(0))
+        return f"\n@@SVG{len(stashed) - 1}@@\n"
+
+    prepared = re.sub(r"<svg\b[\s\S]*?</svg>", keep_svg, raw, flags=re.I)
     parser = HtmlToMarkdown()
-    parser.feed(raw)
+    parser.feed(prepared)
     text = "".join(parser.parts)
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    return text
+    for index, svg in enumerate(stashed):
+        text = text.replace(f"@@SVG{index}@@", f"\n```svg\n{svg}\n```\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(
+        r"(?m)^([ \t]*(?:[-*]|\d+\.)[ \t]*)\n+(?=\S)",
+        lambda match: match.group(1) if match.group(1).endswith(" ") else match.group(1) + " ",
+        text,
+    )
+    text = re.sub(r"(\|[^\n]*\|)\n\n(?=\|[^\n]*\|)", r"\1\n", text)
+    return localize_markdown_images(text.strip())
 
 
 def save_clip(conn: sqlite3.Connection, source: str, title: str, question: str, answer: str) -> dict:
-    answer = answer.replace("\r\n", "\n")
+    answer = localize_markdown_images(answer.replace("\r\n", "\n"))
     question = question.replace("\r\n", "\n").strip()
     if not answer.strip():
         raise ValueError("empty")
@@ -692,6 +966,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_file(self, path: Path) -> None:
         if not path.exists() or not path.is_file():
+            if path.name == "index.html":
+                page = (
+                    "<!doctype html><meta charset=utf-8><title>匣子暂时打不开</title>"
+                    "<body style=\"font-family:sans-serif;padding:48px\">"
+                    "<p>页面文件还没就绪，过几秒刷新一下。</p></body>"
+                ).encode()
+                self.send_response(503)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+                return
             self.send_error(404)
             return
         kind = {
@@ -699,7 +985,12 @@ class Handler(BaseHTTPRequestHandler):
             ".css": "text/css; charset=utf-8",
             ".js": "text/javascript; charset=utf-8",
             ".svg": "image/svg+xml",
-        }.get(path.suffix, "application/octet-stream")
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+        }.get(path.suffix.lower(), "application/octet-stream")
         data = path.read_bytes()
         self.send_response(200)
         self.send_header("Content-Type", kind)
@@ -712,6 +1003,13 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         if path == "/":
             self.send_file(STATIC / "index.html")
+            return
+        if path.startswith("/media/"):
+            name = path.removeprefix("/media/")
+            if not IMAGE_NAME.match(name):
+                self.send_error(404)
+                return
+            self.send_file(IMAGES / name)
             return
         if path.startswith("/static/"):
             rel = path.removeprefix("/static/")
@@ -782,6 +1080,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(data)
                 return
             body = read_json(self)
+            if parsed.path == "/api/images":
+                try:
+                    if body.get("data"):
+                        payload = str(body["data"])
+                        mime = str(body.get("mime") or "")
+                        if payload.startswith("data:"):
+                            url = ingest_image_src(payload)
+                        else:
+                            url = store_image(base64.b64decode(payload), mime)
+                    elif body.get("url"):
+                        url = ingest_image_src(str(body["url"]))
+                    else:
+                        self.send_json({"error": "没有图片"}, 400)
+                        return
+                except (ValueError, URLError, OSError, TimeoutError, binascii.Error):
+                    self.send_json({"error": "这张图片存不下来"}, 400)
+                    return
+                self.send_json({"url": url})
+                return
             if parsed.path == "/api/clips":
                 try:
                     result = save_clip(
@@ -843,7 +1160,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not exists:
                         self.send_json({"error": "找不到这条收藏"}, 404)
                         return
-                    answer = str(body.get("answer") or "").replace("\r\n", "\n")
+                    answer = localize_markdown_images(str(body.get("answer") or "").replace("\r\n", "\n"))
                     question = str(body.get("question") or "").replace("\r\n", "\n").strip()
                     if not answer.strip():
                         self.send_json({"error": "回答不能为空"}, 400)
